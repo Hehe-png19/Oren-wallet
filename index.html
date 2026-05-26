@@ -601,6 +601,7 @@ function renderNav(){
   const homeActive = p==='home';
   const walletActive = p==='wallets'||p==='wallet-detail'||p==='add-wallet'||p==='edit-wallet';
   const histActive = p==='history'||p==='tx-detail';
+  const toolsActive = p==='calc'||p==='kurs'||p==='transfer';
   document.getElementById('bottom-nav').innerHTML=`
     <button class="nav-btn" onclick="go('home')">
       <span class="nav-icon">🏠</span>
@@ -618,11 +619,42 @@ function renderNav(){
       <span class="nav-icon">📋</span>
       <span class="nav-label ${histActive?'active':''}">Riwayat</span>
     </button>
-    <button class="nav-btn" onclick="go('calc')">
-      <span class="nav-icon">🧮</span>
-      <span class="nav-label ${p==='calc'?'active':''}">Kalkulator</span>
+    <button class="nav-btn" onclick="showToolsMenu()">
+      <span class="nav-icon">🔧</span>
+      <span class="nav-label ${toolsActive?'active':''}">Tools</span>
     </button>
   `;
+}
+
+function showToolsMenu(){
+  const p = state.page;
+  showModal(`
+    <div style="font-family:var(--font-display);font-size:0.9rem;font-weight:800;color:#fff;margin-bottom:16px;text-transform:uppercase;letter-spacing:1px">Tools</div>
+    <div style="display:flex;flex-direction:column;gap:8px">
+      <button onclick="hideModal();go('calc')" style="display:flex;align-items:center;gap:14px;padding:14px 16px;background:#141414;border:1px solid ${p==='calc'?'#555':'#222'};border-radius:8px;cursor:pointer;width:100%;text-align:left">
+        <div style="font-size:1.4rem">🧮</div>
+        <div>
+          <div style="font-family:var(--font-display);font-size:0.82rem;font-weight:700;color:#fff;text-transform:uppercase">Kalkulator</div>
+          <div style="font-size:0.65rem;color:#555;margin-top:2px">Hitung & pakai sebagai nominal</div>
+        </div>
+      </button>
+      <button onclick="hideModal();go('kurs')" style="display:flex;align-items:center;gap:14px;padding:14px 16px;background:#141414;border:1px solid ${p==='kurs'?'#555':'#222'};border-radius:8px;cursor:pointer;width:100%;text-align:left">
+        <div style="font-size:1.4rem">💱</div>
+        <div>
+          <div style="font-family:var(--font-display);font-size:0.82rem;font-weight:700;color:#fff;text-transform:uppercase">Konversi Kurs</div>
+          <div style="font-size:0.65rem;color:#555;margin-top:2px">Rupiah ke mata uang lain</div>
+        </div>
+      </button>
+      <button onclick="hideModal();go('transfer')" style="display:flex;align-items:center;gap:14px;padding:14px 16px;background:#141414;border:1px solid ${p==='transfer'?'#555':'#222'};border-radius:8px;cursor:pointer;width:100%;text-align:left">
+        <div style="font-size:1.4rem">↔️</div>
+        <div>
+          <div style="font-family:var(--font-display);font-size:0.82rem;font-weight:700;color:#fff;text-transform:uppercase">Transfer</div>
+          <div style="font-size:0.65rem;color:#555;margin-top:2px">Pindah saldo antar dompet</div>
+        </div>
+      </button>
+    </div>
+    <button onclick="hideModal()" style="width:100%;margin-top:12px;padding:11px;background:transparent;border:1px solid #222;border-radius:8px;color:#555;font-family:var(--font-display);font-weight:700;font-size:0.7rem;cursor:pointer;letter-spacing:1px;text-transform:uppercase">Tutup</button>
+  `);
 }
 
 // ─── RENDER MAIN ─────────────────────────────────────────────────
@@ -640,6 +672,8 @@ function render(){
   else if(p==='edit-wallet') renderEditWallet();
   else if(p==='backup')   renderBackup();
   else if(p==='calc')     renderCalc();
+  else if(p==='kurs')     { renderKurs(); if(!kursState.rates) fetchKurs(); }
+  else if(p==='transfer') renderTransfer();
 }
 function go(page){ state.page=page; render(); }
 
@@ -1144,7 +1178,7 @@ function walletFormHTML(wf){
         <input class="form-input" type="number" inputmode="numeric" placeholder="0"
           style="padding-left:44px" value="${wf.balance||''}" oninput="state.wForm.balance=this.value">
       </div>
-      <div style="font-size:0.69rem;color:var(--text3);margin-top:6px">Isi untuk set saldo manual (akan menghapus histori transaksi dompet ini)</div>
+      <div style="font-size:0.69rem;color:var(--text3);margin-top:6px">Isi untuk set saldo (riwayat tetap aman, akan ditambah transaksi koreksi otomatis)</div>
     </div>
     <div style="margin-bottom:16px">
       <div class="form-label">Budget per Minggu (opsional)</div>
@@ -1203,13 +1237,20 @@ function saveEditWallet(){
   if(!state.wForm.name.trim()) return showToast('Isi nama dompet!','#d94040','#fff');
   const w=walletById(state.editingWallet);
   w.name=state.wForm.name.trim(); w.icon=state.wForm.icon; w.color=state.wForm.color; w.budget=parseInt(state.wForm.budget)||0;
-  // Handle balance override
-  const newBal = state.wForm.balance!=='' ? parseInt(state.wForm.balance) : null;
-  if(newBal !== null && !isNaN(newBal)){
-    // Remove existing txs for this wallet, add one "saldo awal" entry
-    state.txs = state.txs.filter(t=>t.walletId!==w.id);
-    if(newBal !== 0){
-      state.txs.unshift({ id:Date.now(), type:'in', walletId:w.id, amount:Math.abs(newBal), note:'Saldo awal', date:today() });
+  // Handle balance adjustment — TIDAK hapus riwayat, hanya tambah transaksi koreksi
+  const targetBal = state.wForm.balance!=='' ? parseInt(state.wForm.balance) : null;
+  if(targetBal !== null && !isNaN(targetBal)){
+    const currentBal = walletBalance(w.id, 'semua');
+    const diff = targetBal - currentBal;
+    if(diff !== 0){
+      state.txs.unshift({
+        id: Date.now(),
+        type: diff > 0 ? 'in' : 'out',
+        walletId: w.id,
+        amount: Math.abs(diff),
+        note: 'Koreksi saldo (sebelumnya '+formatRp(currentBal)+')',
+        date: today()
+      });
     }
   }
   save(); go('wallets');
@@ -1287,7 +1328,23 @@ function calcInput(val){
     if(c.fresh||c.display==='0'){ c.display=val; c.fresh=false; }
     else c.display+=val;
   }
-  renderCalc();
+  // Update display only — no full re-render to avoid flicker
+  updateCalcDisplay();
+}
+
+function updateCalcDisplay(){
+  const c = state.calc;
+  const fmt = n => {
+    const num = parseFloat(n);
+    if(isNaN(num)) return n;
+    return num.toLocaleString('id-ID', {maximumFractionDigits:8});
+  };
+  const exprEl = document.getElementById('calc-expr');
+  const dispEl = document.getElementById('calc-display');
+  const rpEl   = document.getElementById('calc-rp');
+  if(exprEl) exprEl.textContent = c.expr||'';
+  if(dispEl) dispEl.textContent = fmt(c.display);
+  if(rpEl)   rpEl.textContent   = 'Rp '+(parseFloat(c.display)||0).toLocaleString('id-ID');
 }
 
 function calcUseAsAmount(){
@@ -1307,6 +1364,7 @@ function renderCalc(){
     if(isNaN(num)) return n;
     return num.toLocaleString('id-ID', {maximumFractionDigits:8});
   };
+
   const btns = [
     ['C','%','⌫','÷'],
     ['7','8','9','×'],
@@ -1314,13 +1372,16 @@ function renderCalc(){
     ['1','2','3','+'],
     ['0','.',  '=','='],
   ];
+
   const btnStyle = (b) => {
     const isOp=['+','-','×','÷'].includes(b);
     const isEq=b==='=';
     const isFn=['C','%','⌫'].includes(b);
-    const bg = isEq?'var(--accent)':isOp?'#222':isFn?'#1e1e1e':'#181818';
-    const color = isEq?'#fff':isOp?'var(--accent)':isFn?'#aaa':'#fff';
-    return `background:${bg};color:${color}`;
+    // B&W palette: operators = dark gray, eq = white, fn = medium gray, num = slightly lighter gray
+    const bg = isEq?'#ffffff':isOp?'#2e2e2e':isFn?'#242424':'#1c1c1c';
+    const color = isEq?'#000000':isOp?'#ffffff':isFn?'#cccccc':'#ffffff';
+    const border = isEq?'none':isOp?'1px solid #444':'1px solid #333';
+    return `background:${bg};color:${color};border:${border}`;
   };
 
   let rowsHTML = '';
@@ -1333,41 +1394,256 @@ function renderCalc(){
       const b=row[ci];
       const isDouble=r===4&&ci===0;
       const isDoubleEq=r===4&&ci===2;
+      const baseStyle=`border:none;border-radius:10px;font-family:var(--font-display);font-weight:700;font-size:1.3rem;cursor:pointer;padding:18px 0;touch-action:manipulation;user-select:none;-webkit-user-select:none;`;
       if(isDouble){
-        cells+=`<button onclick="calcInput('${b}')" style="flex:2;${btnStyle(b)};border:none;border-radius:18px;font-family:var(--font-display);font-weight:700;font-size:1.25rem;cursor:pointer;padding:20px;transition:opacity 0.1s" ontouchstart="this.style.opacity=0.7" ontouchend="this.style.opacity=1">${b}</button>`;
+        cells+=`<button onclick="calcInput('${b}')" style="flex:2;${btnStyle(b)};${baseStyle}">${b}</button>`;
       } else if(isDoubleEq){
-        cells+=`<button onclick="calcInput('=')" style="flex:2;${btnStyle('=')};border:none;border-radius:18px;font-family:var(--font-display);font-weight:800;font-size:1.4rem;cursor:pointer;padding:20px;transition:opacity 0.1s" ontouchstart="this.style.opacity=0.7" ontouchend="this.style.opacity=1">=</button>`;
+        cells+=`<button onclick="calcInput('=')" style="flex:2;${btnStyle('=')};${baseStyle};font-weight:800;font-size:1.5rem">=</button>`;
         skip=true;
       } else {
-        cells+=`<button onclick="calcInput('${b}')" style="flex:1;${btnStyle(b)};border:none;border-radius:18px;font-family:var(--font-display);font-weight:700;font-size:1.25rem;cursor:pointer;padding:20px;transition:opacity 0.1s" ontouchstart="this.style.opacity=0.7" ontouchend="this.style.opacity=1">${b}</button>`;
+        cells+=`<button onclick="calcInput('${b}')" style="flex:1;${btnStyle(b)};${baseStyle}">${b}</button>`;
       }
     }
-    rowsHTML+=`<div style="display:flex;gap:10px">${cells}</div>`;
+    rowsHTML+=`<div style="display:flex;gap:8px">${cells}</div>`;
   }
 
   document.getElementById('page-content').innerHTML=`
-    <div style="padding:24px 16px 0" class="fade-up">
-      <div style="font-size:0.55rem;letter-spacing:3px;color:var(--text3);text-transform:uppercase;margin-bottom:6px">Tools</div>
-      <div style="font-family:var(--font-display);font-size:1.5rem;font-weight:800;color:var(--text);margin-bottom:20px;letter-spacing:-0.3px">KALKULATOR</div>
+    <div style="padding:20px 16px 0" class="fade-up">
+      <div style="font-size:0.55rem;letter-spacing:3px;color:var(--text3);text-transform:uppercase;margin-bottom:4px">Tools</div>
+      <div style="font-family:var(--font-display);font-size:1.4rem;font-weight:800;color:var(--text);margin-bottom:16px;letter-spacing:-0.3px">KALKULATOR</div>
 
-      <!-- Display -->
-      <div style="background:#0c0c0c;border:1px solid var(--border2);border-left:2px solid var(--accent);border-radius:6px;padding:20px 22px 16px;margin-bottom:16px">
-        <div style="font-size:0.7rem;color:#444;min-height:18px;text-align:right;font-family:var(--font-display);letter-spacing:0.5px">${c.expr||''}</div>
-        <div style="font-family:var(--font-display);font-size:2.2rem;font-weight:800;color:var(--text);text-align:right;margin-top:4px;word-break:break-all;line-height:1.1">${fmt(c.display)}</div>
-        <div style="font-size:0.6rem;color:#444;text-align:right;margin-top:6px;letter-spacing:0.5px">Rp${parseFloat(c.display)||0>0?Number(parseFloat(c.display)).toLocaleString('id-ID'):'-'}</div>
+      <!-- Display — hitam putih, tidak re-render saat tombol ditekan -->
+      <div style="background:#0a0a0a;border:1px solid #2a2a2a;border-radius:10px;padding:18px 20px 14px;margin-bottom:12px">
+        <div id="calc-expr" style="font-size:0.72rem;color:#555;min-height:18px;text-align:right;font-family:var(--font-display);letter-spacing:0.5px">${c.expr||''}</div>
+        <div id="calc-display" style="font-family:var(--font-display);font-size:2.4rem;font-weight:800;color:#ffffff;text-align:right;margin-top:2px;word-break:break-all;line-height:1.1">${fmt(c.display)}</div>
+        <div id="calc-rp" style="font-size:0.65rem;color:#444;text-align:right;margin-top:4px;letter-spacing:0.5px">Rp ${(parseFloat(c.display)||0).toLocaleString('id-ID')}</div>
       </div>
 
-      <!-- Buttons -->
-      <div style="display:flex;flex-direction:column;gap:10px;margin-bottom:16px">
+      <!-- Tombol — no ontouchstart/ontouchend to prevent flicker -->
+      <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:12px">
         ${rowsHTML}
       </div>
 
       <!-- Use as amount -->
-      <button onclick="calcUseAsAmount()" style="width:100%;padding:14px;background:transparent;border:1px solid var(--accent);border-radius:4px;color:var(--accent);font-family:var(--font-display);font-weight:700;font-size:0.72rem;cursor:pointer;letter-spacing:1.5px;text-transform:uppercase">
+      <button onclick="calcUseAsAmount()" style="width:100%;padding:13px;background:transparent;border:1px solid #444;border-radius:8px;color:#ccc;font-family:var(--font-display);font-weight:700;font-size:0.72rem;cursor:pointer;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:12px">
         ↗ Gunakan sebagai nominal transaksi
       </button>
     </div>
   `;
+}
+
+// ─── KURS KONVERTER ───────────────────────────────────────────────
+const CURRENCIES = [
+  { code:'USD', name:'Dolar AS',        flag:'🇺🇸' },
+  { code:'EUR', name:'Euro',            flag:'🇪🇺' },
+  { code:'SGD', name:'Dolar Singapura', flag:'🇸🇬' },
+  { code:'MYR', name:'Ringgit Malaysia',flag:'🇲🇾' },
+  { code:'JPY', name:'Yen Jepang',      flag:'🇯🇵' },
+  { code:'GBP', name:'Poundsterling',   flag:'🇬🇧' },
+  { code:'AUD', name:'Dolar Australia', flag:'🇦🇺' },
+  { code:'CNY', name:'Yuan China',      flag:'🇨🇳' },
+  { code:'KRW', name:'Won Korea',       flag:'🇰🇷' },
+  { code:'SAR', name:'Riyal Saudi',     flag:'🇸🇦' },
+  { code:'AED', name:'Dirham UAE',      flag:'🇦🇪' },
+  { code:'THB', name:'Baht Thailand',   flag:'🇹🇭' },
+];
+
+let kursState = {
+  amount: '',
+  from: 'IDR',
+  to: 'USD',
+  rates: null,
+  loading: false,
+  error: null,
+  lastFetch: null,
+};
+
+async function fetchKurs(){
+  if(kursState.rates && kursState.lastFetch && (Date.now()-kursState.lastFetch < 300000)) {
+    renderKurs(); return;
+  }
+  kursState.loading = true; kursState.error = null;
+  renderKurs();
+  try {
+    // Gunakan API gratis tanpa key
+    const res = await fetch('https://api.exchangerate-api.com/v4/latest/IDR');
+    if(!res.ok) throw new Error('Gagal ambil data kurs');
+    const data = await res.json();
+    kursState.rates = data.rates;
+    kursState.lastFetch = Date.now();
+    kursState.loading = false;
+    renderKurs();
+  } catch(e) {
+    // Fallback rates jika API gagal
+    kursState.rates = { USD:0.000062, EUR:0.000057, SGD:0.000083, MYR:0.00029, JPY:0.0092, GBP:0.000049, AUD:0.000096, CNY:0.00045, KRW:0.083, SAR:0.00023, AED:0.00023, THB:0.0022, IDR:1 };
+    kursState.loading = false;
+    kursState.error = 'Offline — menggunakan kurs estimasi';
+    renderKurs();
+  }
+}
+
+function renderKurs(){
+  const ks = kursState;
+  const amt = parseFloat(ks.amount)||0;
+  let result = '';
+  if(ks.rates && amt>0){
+    // IDR ke mata uang lain
+    const rateTarget = ks.rates[ks.to]||1;
+    const converted = amt * rateTarget;
+    const toCurr = CURRENCIES.find(c=>c.code===ks.to)||{flag:'',name:ks.to};
+    result = `
+      <div style="background:#0a0a0a;border:1px solid #2a2a2a;border-radius:10px;padding:20px;margin-bottom:12px;text-align:center">
+        <div style="font-size:0.65rem;color:#555;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:6px;font-family:var(--font-display)">${(amt).toLocaleString('id-ID')} IDR =</div>
+        <div style="font-family:var(--font-display);font-size:2rem;font-weight:800;color:#fff;letter-spacing:-0.5px">${toCurr.flag} ${converted.toLocaleString('id-ID',{maximumFractionDigits:4})}</div>
+        <div style="font-size:0.72rem;color:#888;margin-top:4px;font-family:var(--font-display)">${ks.to} · ${toCurr.name}</div>
+        <div style="font-size:0.62rem;color:#444;margin-top:8px">1 IDR = ${rateTarget.toLocaleString('id-ID',{maximumFractionDigits:8})} ${ks.to}</div>
+        <div style="font-size:0.62rem;color:#444;margin-top:2px">1 ${ks.to} = ${(1/rateTarget).toLocaleString('id-ID',{maximumFractionDigits:2})} IDR</div>
+      </div>`;
+  }
+
+  const currOpts = CURRENCIES.map(c=>`<option value="${c.code}" ${ks.to===c.code?'selected':''}>${c.flag} ${c.code} — ${c.name}</option>`).join('');
+
+  document.getElementById('page-content').innerHTML=`
+    <div style="padding:20px 16px 0" class="fade-up">
+      <div style="font-size:0.55rem;letter-spacing:3px;color:var(--text3);text-transform:uppercase;margin-bottom:4px">Tools</div>
+      <div style="font-family:var(--font-display);font-size:1.4rem;font-weight:800;color:var(--text);margin-bottom:16px;letter-spacing:-0.3px">KONVERSI KURS</div>
+
+      <div style="background:#111;border:1px solid #222;border-radius:10px;padding:18px;margin-bottom:12px">
+        <div style="font-size:0.6rem;color:#555;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:8px;font-family:var(--font-display)">Nominal (Rupiah)</div>
+        <div style="position:relative;margin-bottom:16px">
+          <span style="position:absolute;left:14px;top:50%;transform:translateY(-50%);color:#666;font-family:var(--font-display);font-weight:700;font-size:0.9rem">Rp</span>
+          <input class="form-input" type="number" inputmode="numeric" placeholder="0"
+            style="padding-left:44px;font-family:var(--font-display);font-size:1.2rem;font-weight:700;background:#0a0a0a;border-color:#2a2a2a"
+            value="${ks.amount}" oninput="kursState.amount=this.value;renderKurs()">
+        </div>
+        <div style="font-size:0.6rem;color:#555;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:8px;font-family:var(--font-display)">Ke Mata Uang</div>
+        <select class="form-input" style="background:#0a0a0a;border-color:#2a2a2a;color:#fff;font-family:var(--font-display)"
+          onchange="kursState.to=this.value;renderKurs()">
+          ${currOpts}
+        </select>
+      </div>
+
+      ${ks.loading ? `<div style="text-align:center;padding:20px;color:#555;font-family:var(--font-display);font-size:0.8rem;letter-spacing:1px">⏳ Mengambil kurs terkini...</div>` : ''}
+      ${ks.error ? `<div style="font-size:0.7rem;color:#666;text-align:center;margin-bottom:10px;font-family:var(--font-display)">${ks.error}</div>` : ''}
+      ${result}
+
+      <!-- Semua Kurs -->
+      ${ks.rates && !ks.loading ? `
+        <div style="font-size:0.6rem;color:#444;letter-spacing:2px;text-transform:uppercase;margin-bottom:10px;font-family:var(--font-display)">Semua Kurs (1 IDR)</div>
+        <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:16px">
+          ${CURRENCIES.map(c=>{
+            const rate = ks.rates[c.code]||0;
+            const rev = rate>0?(1/rate).toLocaleString('id-ID',{maximumFractionDigits:2}):'-';
+            return `<div style="display:flex;align-items:center;padding:11px 14px;background:#0f0f0f;border:1px solid #1e1e1e;border-radius:8px;cursor:pointer${ks.to===c.code?';border-color:#444':''}" onclick="kursState.to='${c.code}';renderKurs()">
+              <div style="font-size:1.1rem;margin-right:10px">${c.flag}</div>
+              <div style="flex:1">
+                <div style="font-family:var(--font-display);font-size:0.78rem;font-weight:700;color:#ddd">${c.code}</div>
+                <div style="font-size:0.62rem;color:#555;margin-top:2px">${c.name}</div>
+              </div>
+              <div style="text-align:right">
+                <div style="font-family:var(--font-display);font-size:0.78rem;font-weight:700;color:#fff">${rate.toLocaleString('id-ID',{maximumFractionDigits:6})}</div>
+                <div style="font-size:0.6rem;color:#555;margin-top:2px">1 ${c.code} = Rp${rev}</div>
+              </div>
+            </div>`;
+          }).join('')}
+        </div>
+        <div style="font-size:0.58rem;color:#333;text-align:center;margin-bottom:16px;font-family:var(--font-display)">${ks.lastFetch?'Update: '+new Date(ks.lastFetch).toLocaleTimeString('id-ID'):''}</div>
+      ` : ''}
+    </div>
+  `;
+}
+
+// ─── TRANSFER ANTAR DOMPET ────────────────────────────────────────
+let transferState = { from:'', to:'', amount:'', note:'' };
+
+function renderTransfer(){
+  const ts = transferState;
+  const wallets = state.wallets;
+
+  document.getElementById('page-content').innerHTML=`
+    <div style="padding:20px 16px" class="slide-in">
+      <div style="font-size:0.55rem;letter-spacing:3px;color:var(--text3);text-transform:uppercase;margin-bottom:4px">Aksi</div>
+      <div style="font-family:var(--font-display);font-size:1.4rem;font-weight:800;color:var(--text);margin-bottom:18px;letter-spacing:-0.3px">TRANSFER</div>
+
+      <div style="margin-bottom:16px">
+        <div class="form-label">Dari Dompet</div>
+        <div style="display:flex;flex-direction:column;gap:6px">
+          ${wallets.map(w=>{
+            const bal = walletBalance(w.id,'semua');
+            const sel = ts.from===w.id;
+            return `<div onclick="transferState.from='${w.id}';if(transferState.to===transferState.from)transferState.to='';renderTransfer()"
+              style="display:flex;align-items:center;gap:12px;padding:12px 14px;border-radius:8px;border:1.5px solid ${sel?'#fff':'#222'};background:${sel?'#1a1a1a':'#0f0f0f'};cursor:pointer">
+              <div style="font-size:1.3rem">${w.icon}</div>
+              <div style="flex:1">
+                <div style="font-family:var(--font-display);font-size:0.8rem;font-weight:700;color:#fff;text-transform:uppercase">${w.name}</div>
+                <div style="font-size:0.65rem;color:#666;margin-top:2px">${formatRp(bal)}</div>
+              </div>
+              ${sel?`<div style="color:#fff;font-size:1rem">✓</div>`:''}
+            </div>`;
+          }).join('')}
+        </div>
+      </div>
+
+      <div style="margin-bottom:16px">
+        <div class="form-label">Ke Dompet</div>
+        <div style="display:flex;flex-direction:column;gap:6px">
+          ${wallets.filter(w=>w.id!==ts.from).map(w=>{
+            const bal = walletBalance(w.id,'semua');
+            const sel = ts.to===w.id;
+            return `<div onclick="transferState.to='${w.id}';renderTransfer()"
+              style="display:flex;align-items:center;gap:12px;padding:12px 14px;border-radius:8px;border:1.5px solid ${sel?'#fff':'#222'};background:${sel?'#1a1a1a':'#0f0f0f'};cursor:pointer">
+              <div style="font-size:1.3rem">${w.icon}</div>
+              <div style="flex:1">
+                <div style="font-family:var(--font-display);font-size:0.8rem;font-weight:700;color:#fff;text-transform:uppercase">${w.name}</div>
+                <div style="font-size:0.65rem;color:#666;margin-top:2px">${formatRp(bal)}</div>
+              </div>
+              ${sel?`<div style="color:#fff;font-size:1rem">✓</div>`:''}
+            </div>`;
+          }).join('')}
+        </div>
+      </div>
+
+      <div style="margin-bottom:14px">
+        <div class="form-label">Nominal Transfer</div>
+        <div style="position:relative">
+          <span style="position:absolute;left:14px;top:50%;transform:translateY(-50%);color:#666;font-family:var(--font-display);font-weight:700;font-size:0.9rem">Rp</span>
+          <input class="form-input" type="number" inputmode="numeric" placeholder="0"
+            style="padding-left:44px;font-family:var(--font-display);font-size:1.1rem;font-weight:700"
+            value="${ts.amount}" oninput="transferState.amount=this.value">
+        </div>
+      </div>
+
+      <div style="margin-bottom:20px">
+        <div class="form-label">Catatan (opsional)</div>
+        <input class="form-input" type="text" placeholder="Contoh: bagi biaya makan..."
+          value="${ts.note}" oninput="transferState.note=this.value">
+      </div>
+
+      <button onclick="doTransfer()" class="big-btn" style="background:#ffffff;color:#000000">
+        ↔ Lakukan Transfer
+      </button>
+    </div>
+  `;
+}
+
+function doTransfer(){
+  const ts = transferState;
+  const amt = parseInt((ts.amount+'').replace(/\D/g,''));
+  if(!ts.from) return showToast('Pilih dompet asal!','#d94040','#fff');
+  if(!ts.to)   return showToast('Pilih dompet tujuan!','#d94040','#fff');
+  if(!amt||amt<=0) return showToast('Nominal tidak valid!','#d94040','#fff');
+  const fromW = walletById(ts.from);
+  const toW   = walletById(ts.to);
+  const bal   = walletBalance(ts.from,'semua');
+  if(amt>bal) return showToast('Saldo tidak cukup!','#d94040','#fff');
+  const now = Date.now();
+  const note = ts.note.trim()||`Transfer ke ${toW.name}`;
+  state.txs.unshift({ id:now,   type:'out', walletId:ts.from, amount:amt, note:note, date:today() });
+  state.txs.unshift({ id:now+1, type:'in',  walletId:ts.to,   amount:amt, note:`Transfer dari ${fromW.name}`, date:today() });
+  save();
+  transferState = { from:'', to:'', amount:'', note:'' };
+  showToast(`Transfer ${formatRp(amt)} berhasil ✓`);
+  go('home');
 }
 
 // ─── PWA ─────────────────────────────────────────────────────────
